@@ -69,6 +69,8 @@
 | D-031 | 2026-07-19 | 制約違反・設定不備で**アプリを落とさない**。必ず**開いた上でエラーを UI にインライン表示**する（設定ファイルのパース/矛盾エラーも、データのセル違反も同様）。保存も違反で中断せず結果を表示 | 途中で落とすと対話型 GUI エディターの利点が失われるため。エラーは"失敗"でなく"表示するデータ"として扱う |
 | D-032 | 2026-07-19 | エラー型は **`anyhow`**（ライブラリ用の厳密エラー型 `thiserror` 等は作らない） | 本アプリは依存グラフの葉（最終成果物）でライブラリとして使われないため |
 | D-033 | 2026-07-19 | IPC の DTO は**基本ドメイン構造体に `serde` を直接 derive して共用**、そのまま出せない箇所（ライフタイム付き等）だけ別 DTO を用意 | 葉アプリなので変換コストを最小化しつつ、必要箇所のみ分離する |
+| D-034 | 2026-07-19 | 依存方針: **`clap` 等の CLI 引数解析 crate は不要**（GUI アプリ）。DTO は `serde` でそのまま渡す（D-033 を確認） | コマンドライン引数を扱わないため。シリアライズは serde で十分 |
+| D-035 | 2026-07-19 | 表示属性（フォント/強調/色 等）は CSV に入れず、**同ディレクトリのサイドカー `<シート名>.style.toml`** に保持。**行属性・列属性**を持ち描画時に適用。アプリが読み書きし、シート一覧には出さない | CSV にスタイルを持たせるとデータサイズが膨らむため分離。TOML で他設定と統一 |
 
 <!--
 追記テンプレート（コピーして使う）:
@@ -136,9 +138,28 @@ spec-project/            ← プロジェクトルート（フォルダ）
 - `.git` が無い場合は、Git 機能を無効（非表示/無効化）にし、**純粋な CSV エディタ**として動作する。
 - ユーザーが後から `git init` した場合、その状態を検知して Git 機能が有効になる（起動時 or リフレッシュ時に判定）。
 
-### 5.4 未確定（このモデルに紐づく後続論点）
+### 5.4 表示属性のサイドカー（`<シート名>.style.toml`, D-035）
 
-- スキャン除外ルール（`.git/` は当然除外。`.constraints.toml` / `.hooks.toml` / `.project.toml` はシート一覧に出さない）
+- 各シートの**表示属性（フォント・太字・色・背景 等）**は、CSV 本体ではなく**同ディレクトリのサイドカー**に保持する（例: `core.csv` → `core.style.toml`）。CSV のデータサイズを膨らませないため。
+- 保持するのは **行に対する属性**と**列に対する属性**（当面。セル単位は将来）。
+- **アプリが読み書き**（GUI の書式操作から）。手書き前提ではない。スキャンではシート一覧に出さない。
+- 行属性のキーは、行ヘッダー有効時は**行ラベル**、無効時は**行インデックス**（インデックスは挿入/削除でズレるためアプリ側で再マップ）。
+
+```toml
+# core.style.toml（core.csv と同じディレクトリ）
+
+[column.processor_type]      # 列に対する属性
+bold  = true
+color = "#c00000"
+font  = "monospace"
+
+[row.3]                      # 行に対する属性（行ラベル or index）
+background = "#fffbdd"
+```
+
+### 5.5 未確定（このモデルに紐づく後続論点）
+
+- スキャン除外ルール（`.git/` は当然除外。`.constraints.toml` / `.hooks.toml` / `.project.toml` / `*.style.toml` はシート一覧に出さない）
 - UI 上でフォルダ階層をどう見せるか（ツリー / タブグループ / フラット）。データモデルは「フォルダ＋シート」で確定だが、**表示方法は別途 UI 設計で決める**。
 
 ---
@@ -456,12 +477,13 @@ pub struct Sheet {
     pub id: SheetId,
     pub grid: Vec<Vec<String>>,  // 2次元セル（D-003）。先頭行=列ヘッダー
     pub has_row_headers: bool,   // 先頭列を行ラベルとして扱うか（D-013）
+    pub style: SheetStyle,       // <name>.style.toml（D-035）
     dirty: bool,
 }
 
 impl Sheet {
-    pub fn load(root: &Path, id: SheetId, has_row_headers: bool) -> Result<Self>; // csv crate
-    pub fn save(&mut self, root: &Path) -> Result<()>;      // csv crate で書き出し, dirty=false
+    pub fn load(root: &Path, id: SheetId, has_row_headers: bool) -> Result<Self>; // csv + style
+    pub fn save(&mut self, root: &Path) -> Result<()>;      // csv + style を書き出し, dirty=false
     pub fn column_headers(&self) -> &[String];              // 先頭行
     pub fn row_headers(&self) -> Option<Vec<&str>>;         // 先頭列（有効時のみ）
     pub fn get(&self, pos: CellPos) -> Option<&str>;
@@ -471,6 +493,29 @@ impl Sheet {
     pub fn is_dirty(&self) -> bool;
     /// 行を「列名→値」の辞書として見る（when 評価・検証で使用）。
     pub fn row_map(&self, row: usize) -> BTreeMap<&str, &str>;
+    pub fn set_column_attr(&mut self, column: &str, attr: Attr); // dirty=true
+    pub fn set_row_attr(&mut self, row: RowKey, attr: Attr);     // dirty=true
+}
+
+/// 表示属性（サイドカー `<name>.style.toml`, D-035）。CSV には入れない。
+pub struct SheetStyle {
+    pub columns: BTreeMap<String, Attr>, // 列名 → 属性
+    pub rows: BTreeMap<RowKey, Attr>,    // 行キー → 属性
+}
+/// 行の識別（行ヘッダー有効時はラベル、無効時はインデックス, D-035）。
+pub enum RowKey { Label(String), Index(usize) }
+/// 1つの表示属性セット（当面は行/列単位。将来セル単位も）。
+pub struct Attr {
+    pub font: Option<String>,
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub color: Option<String>,       // 文字色
+    pub background: Option<String>,  // 背景色
+    // 必要に応じて拡張（配置・幅 等）
+}
+impl SheetStyle {
+    pub fn load(root: &Path, sheet: &SheetId) -> Result<Self>; // 無ければ空
+    pub fn save(&self, root: &Path, sheet: &SheetId) -> Result<()>;
 }
 ```
 
