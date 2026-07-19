@@ -45,6 +45,7 @@
 | D-007 | 2026-07-19 | Git はオプショナル（必須にしない）。プロジェクトルートに `.git` が存在する時のみ Git 機能（add/commit/diff/log）を自動有効化。`.git` が無いプロジェクトは Git なしのエディタとして完全動作 | 全ユーザーが Git 管理を望むわけではないため、強制しない |
 | D-008 | 2026-07-19 | 旧「スキーマ(schema)」を「**Constraint（制約）**」に呼称変更。フォーマットは **TOML**、ファイルは **`.constraints.toml`** をプロジェクトルートに1つだけ配置。制約は `[[constraints]]`（array-of-tables）で列挙し、対象はテーブル見出しではなく **パラメータ `sheet` / `column` / `row` で指定**（column のみ=列全体、row のみ=行全体、両方=特定セル） | 用語を分かりやすく。TOML は人にもプログラムにも扱いやすい中間形式。行・列の両方を指定できるよう対象を見出しではなくパラメータに置く |
 | D-009 | 2026-07-19 | Constraint モデルを網羅版に確定。(1)役割は「設計者(制約を作る)」「エンドユーザー(制約下で編集、転置不要)」の2種。(2)ツールは制約をハードコードせず設計者が自由定義。(3)カテゴリは **`[[header]]` と `[[value]]` の2つのみ**（セクション名＝カテゴリ）。(4)`header` は1シート1つで `column_require/optional`・`row_require/optional` により行・列を同時定義（`axis` 廃止）。(5)`value` は `sheet`＋`column`or`row`＋規則(`required`/`enum`/`pattern`/`min`/`max`/`type`)、条件付きは独立カテゴリにせず `value` 内の **`when`** ガードで表現。(6)各ブロックは `sheet` を先頭に置く | 行/列を別セクションにするとスコープが広がり網羅性が不透明になるため1つに統合。`when` を value 内包にすることで種類の掛け算的増加を防ぎ拡張可能な器にする |
+| D-010 | 2026-07-19 | `header` の未指定ラベルは**既定で禁止（明示許可のみ通す）**。`*_require` は**リテラル厳密一致**、`*_optional` は**グロブ可**（`*` / `metric_*`）。「任意の追加を許可」は `optional` に catch-all `*` を入れて表現。`forbid_extra` フラグは廃止 | 既定を厳格にし、許可を列挙／グロブで表せば専用フラグは不要。設計者が余分ラベルを明示制御できる。グロブは `*` の直感に忠実で読みやすい |
 
 <!--
 追記テンプレート（コピーして使う）:
@@ -156,11 +157,16 @@ spec-project/            ← プロジェクトルート（フォルダ）
 | フィールド | 意味 |
 |---|---|
 | `sheet` | 対象シートの相対パス（必須） |
-| `column_require` | 必須の列名リスト |
-| `column_optional` | 任意（あってもよい）列名リスト |
-| `row_require` | 必須の行名リスト |
-| `row_optional` | 任意の行名リスト |
-| `forbid_extra` | 未指定のラベルを禁止するか（既定=許す）※未確定 |
+| `column_require` | 必須の列名リスト。**リテラルで厳密一致** |
+| `column_optional` | 任意（あってもよい）列名リスト。**グロブ可**（`*` / `metric_*`） |
+| `row_require` | 必須の行名リスト。**リテラルで厳密一致** |
+| `row_optional` | 任意の行名リスト。**グロブ可** |
+
+**未指定ラベルの扱い（重要）:**
+- `require` にも `optional` にも当てはまらないラベルは **既定で禁止（エラー）**。明示的に許可されていないものは全部アウト。
+- 「任意の追加ラベルを許可」したい場合は、`optional` に catch-all の **`*`** を1つ入れる。
+- `require` は**リテラル厳密一致**（必須名は確定しているため）。グロブが使えるのは `optional` 側のみ。
+- 上記により、旧案の `forbid_extra` フラグは**不要（廃止）**。既定が厳格で、許可は列挙／グロブで表す。
 
 ### 6.5 `[[value]]` の記法
 
@@ -182,10 +188,12 @@ spec-project/            ← プロジェクトルート（フォルダ）
 # ── header: 行名・列名（構造）。1シート1つで行も列も定義 ──
 [[header]]
 sheet           = "core.csv"
-column_require  = ["device_id", "processor_type"]  # 必須の列名
-column_optional = ["note", "owner"]                # 任意の列名
+column_require  = ["device_id", "processor_type"]  # 必須の列名（リテラル厳密一致）
+column_optional = ["note", "owner", "metric_*"]    # 任意の列名（グロブ可）。metric_* を許可
 row_require     = []                               # 必須の行名（不要なら空/省略）
-row_optional    = []                               # 任意の行名
+row_optional    = []                               # 任意の行名（グロブ可）
+# require にも optional にも当てはまらない列 → エラー（既定=禁止）
+# 任意の追加列をすべて許可したいなら column_optional に "*" を入れる
 
 # ── value: 値への制約 ──
 [[value]]
@@ -216,7 +224,6 @@ when     = { column = "processor_type", equals = "ARM" }
 
 ### 6.8 未確定（後続で詰める）
 
-- `forbid_extra` の既定値と挙動（未指定ラベルを許すか禁じるか）
 - `value` の規則フィールドの正式な全リストと各パラメータ仕様
 - `when` の複数条件（AND / OR）の書き方
 - 同一ラインに複数の `[[value]]` が該当した場合の優先順位／マージ規則
