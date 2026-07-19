@@ -1,0 +1,41 @@
+# Spec CSV Editor — Constraint 定義（docs/design.md 第6章）
+
+# 構造制約: core.csv は device_id / processor_type を必須、cores / note は任意
+[[header]]
+sheet           = "core.csv"
+column_require  = ["device_id", "processor_type"]
+column_optional = ["cores", "note"]
+
+# 値制約
+[[value]]
+sheet   = "core.csv"
+column  = "device_id"
+type    = "string"
+required = true
+pattern = "^D[0-9]{3}$"
+
+[[value]]
+sheet  = "core.csv"
+column = "processor_type"
+enum   = ["ARM", "MIPS", "x86"]
+
+# 条件付き: ARM の行だけ cores 必須（when）
+[[value]]
+sheet    = "core.csv"
+column   = "cores"
+type     = "int"
+required = true
+min      = 1
+max      = 128
+when     = "{column=processor_type, equals=ARM}"
+
+# modules 配下すべてに適用（sheet グロブ）
+[[header]]
+sheet           = "modules/*.csv"
+column_require  = ["role"]
+column_optional = ["scope", "note"]
+
+[[value]]
+sheet  = "modules/auth.csv"
+column = "role"
+enum   = ["admin", "user"]

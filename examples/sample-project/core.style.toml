@@ -1,0 +1,11 @@
+# 表示属性サイドカー（docs/design.md 5.4, D-035）。core.csv と同ディレクトリ。
+
+[column.processor_type]
+bold  = true
+color = "#c00000"
+
+[column.device_id]
+font = "monospace"
+
+[row.0]
+background = "#fffbdd"

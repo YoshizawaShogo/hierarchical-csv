@@ -1,0 +1,18 @@
+[package]
+name = "spec-editor"
+version = "0.1.0"
+edition = "2021"
+description = "Spec CSV Editor — Tauri shell (thin command layer over spec-editor-core)"
+license = "LicenseRef-MIT-Commons-Clause"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+spec-editor-core = { path = "../core" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

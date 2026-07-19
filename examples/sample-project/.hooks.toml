@@ -1,0 +1,11 @@
+# フック定義（docs/design.md 第8章）。信頼が有効なときのみ実行（D-027）。
+
+[[on_save]]
+command     = "echo saved {csv_path}"
+description = "保存ログ"
+fail_policy = "warn"
+
+[[on_export]]
+command     = "echo export {project_root}"
+description = "エクスポート例"
+fail_policy = "ignore"

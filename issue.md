@@ -30,3 +30,14 @@
 
 - **I-FE-1**: フロントは骨組みのみ（左サイドバー切替＋LibreOffice 風グリッドのレイアウト雛形）。
   Tauri コマンド呼び出しは webkit 環境が無いため未疎通。実データ結線は GUI 環境で要確認。
+  （※ `npm run typecheck` / `npm run build` は成功済み。バンドルは通る。）
+
+## 進捗メモ（この作業セッション）
+
+- `core/` を実装し **`cargo test` 35件 green**（単体33＋統合2）。`examples/sample-project`
+  を使った統合テストで、実ファイル上でも設計が破綻しないことを確認済み。
+- `src-tauri/` と `src/`（React）を作成。**フロントは typecheck / build 成功**。
+  `src-tauri` は webkit 非搭載のためこの環境では未ビルド（I-ENV-1）。
+- 次にやると良い順: (1) GUI 環境で `cargo tauri dev` 疎通 → (2) I-DIFF-1（セル差分）→
+  (3) I-COL-1（列操作）→ (4) I-TRUST-1（信頼 UI）。
+- **要相談だった設計判断（暫定で進めた箇所）**: I-VAL-1〜3, I-WHEN-1/2。起きたら docs/design.md に確定を。

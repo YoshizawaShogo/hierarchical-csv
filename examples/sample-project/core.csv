@@ -1,0 +1,4 @@
+device_id,processor_type,cores,note
+D001,ARM,4,main board
+D002,MIPS,,legacy
+D003,x86,8,
