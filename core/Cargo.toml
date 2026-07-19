@@ -1,0 +1,21 @@
+[package]
+name = "spec-editor-core"
+version = "0.1.0"
+edition = "2021"
+description = "Domain core for Spec CSV Editor (Tauri-independent, unit-testable)"
+license = "LicenseRef-MIT-Commons-Clause"
+
+[lib]
+name = "spec_editor_core"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+csv = "1"
+regex = "1"
+glob = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
