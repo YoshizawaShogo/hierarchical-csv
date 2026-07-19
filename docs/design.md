@@ -71,6 +71,7 @@
 | D-033 | 2026-07-19 | IPC の DTO は**基本ドメイン構造体に `serde` を直接 derive して共用**、そのまま出せない箇所（ライフタイム付き等）だけ別 DTO を用意 | 葉アプリなので変換コストを最小化しつつ、必要箇所のみ分離する |
 | D-034 | 2026-07-19 | 依存方針: **`clap` 等の CLI 引数解析 crate は不要**（GUI アプリ）。DTO は `serde` でそのまま渡す（D-033 を確認） | コマンドライン引数を扱わないため。シリアライズは serde で十分 |
 | D-035 | 2026-07-19 | 表示属性（フォント/強調/色 等）は CSV に入れず、**同ディレクトリのサイドカー `<シート名>.style.toml`** に保持。**行属性・列属性**を持ち描画時に適用。アプリが読み書きし、シート一覧には出さない | CSV にスタイルを持たせるとデータサイズが膨らむため分離。TOML で他設定と統一 |
+| D-036 | 2026-07-19 | **表示しない内部用 `RowId`** を導入し行の同一性を管理。ロード時に採番、追加時に新規採番（セッション内一意・再利用なし）。スタイル行属性・制約の行対象・選択/undo 等の内部参照はこの `RowId` を使い、挿入/削除/並べ替えでズレないようにする。**永続化は既定で非永続**（サイドカーは保存時に index/行ラベルでアンカーし、ロード時に振り直す） | 「行の同一性」問題を一箇所で解消。アプリ内編集中のズレを根絶しつつ、CSV を汚さない |
 
 <!--
 追記テンプレート（コピーして使う）:
@@ -143,7 +144,7 @@ spec-project/            ← プロジェクトルート（フォルダ）
 - 各シートの**表示属性（フォント・太字・色・背景 等）**は、CSV 本体ではなく**同ディレクトリのサイドカー**に保持する（例: `core.csv` → `core.style.toml`）。CSV のデータサイズを膨らませないため。
 - 保持するのは **行に対する属性**と**列に対する属性**（当面。セル単位は将来）。
 - **アプリが読み書き**（GUI の書式操作から）。手書き前提ではない。スキャンではシート一覧に出さない。
-- 行属性のキーは、行ヘッダー有効時は**行ラベル**、無効時は**行インデックス**（インデックスは挿入/削除でズレるためアプリ側で再マップ）。
+- 行属性の内部キーは**隠し `RowId`**（D-036）で管理し、挿入/削除/並べ替えでもズレない。**ディスク上（`.style.toml`）は行ラベル or index でアンカー**し、ロード時に `RowId` へ振り直す。
 
 ```toml
 # core.style.toml（core.csv と同じディレクトリ）
@@ -473,36 +474,43 @@ pub struct ProjectConfig { pub name: String, /* 他の設定 */ }
 ```rust
 pub struct CellPos { pub row: usize, pub col: usize }
 
+/// 表示しない内部用の行ID（D-036）。挿入/削除/並べ替えでも不変。
+pub struct RowId(pub u64);
+
 pub struct Sheet {
     pub id: SheetId,
     pub grid: Vec<Vec<String>>,  // 2次元セル（D-003）。先頭行=列ヘッダー
     pub has_row_headers: bool,   // 先頭列を行ラベルとして扱うか（D-013）
     pub style: SheetStyle,       // <name>.style.toml（D-035）
+    row_ids: Vec<RowId>,         // grid のデータ行と並行。内部識別（D-036, 非表示）
+    next_row_id: u64,            // 採番カウンタ（セッション内一意・再利用なし）
     dirty: bool,
 }
 
 impl Sheet {
-    pub fn load(root: &Path, id: SheetId, has_row_headers: bool) -> Result<Self>; // csv + style
+    pub fn load(root: &Path, id: SheetId, has_row_headers: bool) -> Result<Self>; // csv + style, RowId 採番
     pub fn save(&mut self, root: &Path) -> Result<()>;      // csv + style を書き出し, dirty=false
     pub fn column_headers(&self) -> &[String];              // 先頭行
     pub fn row_headers(&self) -> Option<Vec<&str>>;         // 先頭列（有効時のみ）
     pub fn get(&self, pos: CellPos) -> Option<&str>;
     pub fn set(&mut self, pos: CellPos, value: String);     // dirty=true
-    pub fn insert_row(&mut self, at: usize, row: Vec<String>);
+    pub fn insert_row(&mut self, at: usize, row: Vec<String>); // 新規 RowId を採番
     pub fn remove_row(&mut self, at: usize);
     pub fn is_dirty(&self) -> bool;
+    pub fn row_id(&self, index: usize) -> Option<RowId>;    // index → RowId
+    pub fn index_of(&self, id: RowId) -> Option<usize>;     // RowId → 現在の index
     /// 行を「列名→値」の辞書として見る（when 評価・検証で使用）。
     pub fn row_map(&self, row: usize) -> BTreeMap<&str, &str>;
     pub fn set_column_attr(&mut self, column: &str, attr: Attr); // dirty=true
-    pub fn set_row_attr(&mut self, row: RowKey, attr: Attr);     // dirty=true
+    pub fn set_row_attr(&mut self, row: RowId, attr: Attr);      // dirty=true（内部は RowId, D-036）
 }
 
 /// 表示属性（サイドカー `<name>.style.toml`, D-035）。CSV には入れない。
 pub struct SheetStyle {
     pub columns: BTreeMap<String, Attr>, // 列名 → 属性
-    pub rows: BTreeMap<RowKey, Attr>,    // 行キー → 属性
+    pub rows: BTreeMap<RowId, Attr>,     // 内部は RowId で保持（D-036, ズレない）
 }
-/// 行の識別（行ヘッダー有効時はラベル、無効時はインデックス, D-035）。
+/// ディスク上（.style.toml）で行をアンカーする永続キー（保存/ロードで RowId と相互変換, D-036）。
 pub enum RowKey { Label(String), Index(usize) }
 /// 1つの表示属性セット（当面は行/列単位。将来セル単位も）。
 pub struct Attr {
