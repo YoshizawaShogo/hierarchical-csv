@@ -64,6 +64,7 @@
 | D-026 | 2026-07-19 | **`when_py`（Python エスケープハッチ）は不採用**（D-015 を撤回）。`when` は宣言式のみ。任意コードは実行しない。複雑条件で宣言式に収まらないものは `.hooks.toml` の `on_save` フックで独自検証する | 演算子6種＋`&`/`|`/`()` で実用上足りる。任意コード実行の面をエディタのセル検証から排除できる |
 | D-027 | 2026-07-19 | フックの挙動を確定（Q-5〜Q-9）。①内蔵 Constraint 検証 → 通れば `on_save`（フックは追加処理）②プロジェクト信頼が有効な時のみ実行③`fail_policy`=`error`/`warn`/`ignore`④CWD=プロジェクトルート・変数は絶対パス⑤プロジェクト設定は **`.project.toml`**（設定/制約/フックの3ファイル体制） | サブプロセス実行の安全・順序・パスを明確化し、設定ファイルを役割ごとに分離 |
 | D-028 | 2026-07-19 | グロブ OR の `\|` は **丸ごとのパターンを択一で区切る**（`()` グループ化はしない）。例: `metric_cpu\|metric_gpu`（`metric_(cpu\|gpu)` ではない） | 期待挙動に合わせ、パーサも `\|` で分割するだけの単純実装にする |
+| D-029 | 2026-07-19 | 実装は **型駆動設計**で進める。まず厳密な構造体と、その振る舞いをメソッドとして定義（第9章 ドメインモデル）。以降は薄いヘルパと Tauri コマンドの配線でアプリを完成させる | 構造体と振る舞いが正しく定義できていれば接続は機械的で済み、破綻を早期に発見できる |
 
 <!--
 追記テンプレート（コピーして使う）:
@@ -387,10 +388,244 @@ description = "HTML 仕様書生成"
 
 ---
 
-## 9. データ契約（IPC 型）— 追って確定
+## 9. ドメインモデル（構造体とメソッド）
 
-> Rust ⇄ TypeScript の境界で受け渡す型。Step 0 で確定させる予定。
+> D-029 に基づく **型駆動設計**。「厳密な構造体＋その振る舞い（メソッド）」を先に確定し、あとは薄いヘルパと Tauri コマンドの配線だけでアプリが繋がる、という方針。以下はシグネチャ主体の設計（実装本体は含めない）。`Result` はプロジェクト共通のエラー型を返す想定。
 
+### 9.1 project — プロジェクト全体
+
+```rust
+/// ルートからの相対パスによるシート識別子（例: "modules/auth.csv"）。D-006 / D-011
+pub struct SheetId(pub String);
+
+/// プロジェクト全体。ルート配下を1つの編集単位として扱う。
+pub struct Project {
+    pub root: PathBuf,
+    pub config: ProjectConfig,        // .project.toml（D-027）
+    pub constraints: Constraints,     // .constraints.toml（無ければ空）
+    pub hooks: Hooks,                 // .hooks.toml（無ければ空）
+    pub git: Option<GitRepo>,         // .git があるときのみ Some（D-007）
+    pub trusted: bool,                // 信頼状態（D-027）
+    sheets: BTreeMap<SheetId, Sheet>, // 相対パス → シート
+}
+
+impl Project {
+    /// ルートを開き、設定・制約・フック・git を読み込み、CSV を再帰スキャンする。
+    pub fn open(root: impl Into<PathBuf>) -> Result<Self>;
+    /// CSV を再帰スキャンしてシート一覧を更新（.git/ と .*.toml は除外）。
+    pub fn scan(&mut self) -> Result<()>;
+    pub fn sheet_ids(&self) -> Vec<SheetId>;              // 相対パス順
+    pub fn sheet(&self, id: &SheetId) -> Option<&Sheet>;
+    pub fn sheet_mut(&mut self, id: &SheetId) -> Option<&mut Sheet>;
+    pub fn git_enabled(&self) -> bool;                   // = self.git.is_some()（D-007）
+    pub fn set_trusted(&mut self, yes: bool);            // フック/コード実行の解禁（D-027）
+
+    /// 保存フロー（7.3 / D-027）: 内蔵 Constraint 検証 →（通れば）書き込み → on_save フック。
+    /// 検証違反があれば書き込まず Err(違反リスト)。
+    pub fn save_sheet(&mut self, id: &SheetId) -> Result<SaveReport, Vec<Violation>>;
+    /// エクスポート（on_export フック）。
+    pub fn export(&self) -> Vec<HookOutcome>;
+}
+
+/// .project.toml の内容（プロジェクト設定, D-027）。
+pub struct ProjectConfig { pub name: String, /* 他の設定 */ }
 ```
-（未確定。CsvFile / DiffCell / Commit などをここに記述していく）
+
+### 9.2 sheet — 1枚のシート（CSV）
+
+```rust
+pub struct CellPos { pub row: usize, pub col: usize }
+
+pub struct Sheet {
+    pub id: SheetId,
+    pub grid: Vec<Vec<String>>,  // 2次元セル（D-003）。先頭行=列ヘッダー
+    pub has_row_headers: bool,   // 先頭列を行ラベルとして扱うか（D-013）
+    dirty: bool,
+}
+
+impl Sheet {
+    pub fn load(root: &Path, id: SheetId, has_row_headers: bool) -> Result<Self>; // csv crate
+    pub fn save(&mut self, root: &Path) -> Result<()>;      // csv crate で書き出し, dirty=false
+    pub fn column_headers(&self) -> &[String];              // 先頭行
+    pub fn row_headers(&self) -> Option<Vec<&str>>;         // 先頭列（有効時のみ）
+    pub fn get(&self, pos: CellPos) -> Option<&str>;
+    pub fn set(&mut self, pos: CellPos, value: String);     // dirty=true
+    pub fn insert_row(&mut self, at: usize, row: Vec<String>);
+    pub fn remove_row(&mut self, at: usize);
+    pub fn is_dirty(&self) -> bool;
+    /// 行を「列名→値」の辞書として見る（when 評価・検証で使用）。
+    pub fn row_map(&self, row: usize) -> BTreeMap<&str, &str>;
+}
 ```
+
+### 9.3 constraints — 制約（第6章の実体）
+
+```rust
+pub struct Constraints {
+    pub headers: Vec<HeaderConstraint>,
+    pub values: Vec<ValueConstraint>,
+}
+
+impl Constraints {
+    pub fn load(path: &Path) -> Result<Self>;                // .constraints.toml（無ければ空）
+    /// 静的検証（ロード時）: 型×規則の非互換(D-021)、header 同士の矛盾(D-012)を検出。
+    pub fn check_static(&self, sheet_ids: &[SheetId]) -> Result<(), Vec<ConstraintError>>;
+    /// あるシートに効く header を AND 合成（D-012）。矛盾があれば Err。
+    pub fn effective_header(&self, id: &SheetId) -> Result<EffectiveHeader, ConstraintError>;
+    pub fn values_for(&self, id: &SheetId) -> Vec<&ValueConstraint>;      // D-020
+    pub fn validate_sheet(&self, sheet: &Sheet) -> Vec<Violation>;
+    /// あるセルの enum 候補（プルダウン用）。when を評価して該当する enum を返す。
+    pub fn enum_options(&self, sheet: &Sheet, pos: CellPos) -> Option<Vec<String>>;
+}
+
+/// header 制約（1シート1つで行・列を同時定義, D-009）。
+pub struct HeaderConstraint {
+    pub sheet: GlobPattern,
+    pub column_require: Vec<String>,       // リテラル厳密一致（D-010）
+    pub column_optional: Vec<GlobPattern>, // グロブ可（D-010）
+    pub row_require: Vec<String>,
+    pub row_optional: Vec<GlobPattern>,
+}
+impl HeaderConstraint {
+    pub fn matches_sheet(&self, id: &SheetId) -> bool;
+    pub fn column_allowed(&self, name: &str) -> bool;  // require ∪ optional グロブ（strict 既定 D-010）
+    pub fn row_allowed(&self, name: &str) -> bool;
+}
+
+/// 複数 header の AND 合成結果（D-012）。
+pub struct EffectiveHeader<'a> {
+    pub column_required: BTreeSet<String>, // 各 require の和集合
+    pub row_required: BTreeSet<String>,
+    matched: Vec<&'a HeaderConstraint>,    // 許容判定は全 header の AND
+}
+impl EffectiveHeader<'_> {
+    pub fn column_allowed(&self, name: &str) -> bool;  // matched.iter().all(..)
+    pub fn validate(&self, sheet: &Sheet) -> Vec<Violation>;
+}
+
+/// value 制約（D-009 / D-017 / D-021）。
+pub struct ValueConstraint {
+    pub sheet: GlobPattern,
+    pub target: Target,           // 列 or 行
+    pub rules: ValueRules,
+    pub when: Option<WhenExpr>,   // 適用条件（宣言式のみ, D-026）
+}
+pub enum Target { Column(String), Row(String) }
+
+pub struct ValueRules {
+    pub ty: Option<ValueType>,      // string|int|float（D-017）
+    pub required: bool,
+    pub enums: Option<Vec<String>>, // 単純 enum（D-025）
+    pub pattern: Option<String>,    // string のみ（D-021）
+    pub min: Option<f64>,           // 数値のみ（D-021）
+    pub max: Option<f64>,
+}
+pub enum ValueType { String, Int, Float }
+
+impl ValueRules {
+    pub fn check_compat(&self) -> Result<(), ConstraintError>; // 型×規則の互換性（D-021）
+    pub fn check_value(&self, value: &str) -> Result<(), ViolationKind>;
+}
+impl ValueConstraint {
+    pub fn matches_sheet(&self, id: &SheetId) -> bool;
+    pub fn applies(&self, sheet: &Sheet, row: usize) -> bool;  // when を評価
+    pub fn target_cells(&self, sheet: &Sheet) -> Vec<CellPos>; // Column→列, Row→行
+}
+```
+
+### 9.4 when 式（宣言式パーサ）
+
+```rust
+/// when 式の AST（D-019 / D-026: 宣言式のみ）。
+pub enum WhenExpr {
+    Or(Vec<WhenExpr>),
+    And(Vec<WhenExpr>),
+    Cond(Condition),
+}
+pub struct Condition { pub target: Target, pub op: CompareOp, pub value: CondValue }
+pub enum CompareOp { Equals, NotEqual, Gt, Lt, In, Matches } // 6種（D-019）
+pub enum CondValue { One(String), Many(Vec<String>) }        // Many は in 用
+
+impl WhenExpr {
+    pub fn parse(src: &str) -> Result<Self, ParseError>;         // `{}` 条件, `&`/`|`, `()`
+    pub fn eval(&self, row: &BTreeMap<&str, &str>) -> bool;
+}
+impl Condition { pub fn eval(&self, row: &BTreeMap<&str, &str>) -> bool; }
+```
+
+### 9.5 glob — グロブパターン
+
+```rust
+/// `*` 等の標準グロブ + `|` による択一（D-022 / D-028）。
+pub struct GlobPattern { raw: String, alts: Vec<glob::Pattern> }
+impl GlobPattern {
+    pub fn parse(raw: &str) -> Result<Self>;   // `|` で分割し複数グロブへ
+    pub fn matches(&self, text: &str) -> bool;  // いずれかに一致
+}
+```
+
+### 9.6 git — Git 操作（CLI 叩き, D-002）
+
+```rust
+pub struct GitRepo { root: PathBuf }
+pub struct FileStatus { pub path: String, pub state: FileState }
+pub enum FileState { Modified, Added, Untracked, Deleted, Staged }
+pub struct DiffCell { pub row: usize, pub col: usize, pub old: String, pub new: String, pub status: CellStatus }
+pub enum CellStatus { Modified, Added, Removed }
+pub struct Commit { pub hash: String, pub message: String, pub author: String, pub timestamp: i64 }
+
+impl GitRepo {
+    pub fn discover(root: &Path) -> Option<Self>;                 // .git 探索（D-007）
+    pub fn status(&self) -> Result<Vec<FileStatus>>;
+    pub fn add(&self, paths: &[SheetId]) -> Result<()>;
+    pub fn commit(&self, message: &str) -> Result<Commit>;
+    pub fn diff_cells(&self, id: &SheetId) -> Result<Vec<DiffCell>>; // HEAD~1 とのセル差分
+    pub fn log(&self, limit: usize) -> Result<Vec<Commit>>;
+}
+```
+
+### 9.7 hooks — フック（.hooks.toml, D-024 / D-027）
+
+```rust
+pub struct Hooks { pub on_save: Vec<Hook>, pub on_export: Vec<Hook> }
+pub struct Hook { pub command: String, pub description: String, pub fail_policy: FailPolicy }
+pub enum FailPolicy { Error, Warn, Ignore }
+pub enum HookEvent { Save, Export }
+pub struct HookContext<'a> { pub project_root: &'a Path, pub csv_path: Option<&'a Path>, pub output_path: Option<&'a Path> }
+pub enum HookOutcome { Ok, Warned(String), Failed(String) }
+
+impl Hooks {
+    pub fn load(path: &Path) -> Result<Self>;
+    /// 指定イベントのフックを順に実行。信頼が必要, CWD=root, 変数は絶対パス（D-027）。
+    pub fn run(&self, event: HookEvent, ctx: &HookContext, trusted: bool) -> Vec<HookOutcome>;
+}
+```
+
+### 9.8 validation — 検証結果
+
+```rust
+pub struct Violation { pub sheet: SheetId, pub pos: Option<CellPos>, pub kind: ViolationKind, pub message: String }
+pub enum ViolationKind {
+    MissingRequiredColumn, DisallowedColumn, MissingRequiredRow,
+    TypeMismatch, NotInEnum, PatternMismatch, OutOfRange, Empty,
+}
+```
+
+### 9.9 Tauri コマンド（配線層 = 薄い）
+
+各コマンドは上記メソッドを呼ぶだけの薄いラッパ。IPC 用に serde で（de）シリアライズ。
+
+| コマンド | 呼ぶメソッド |
+|---|---|
+| `scan_csv_tree` | `Project::scan` → `sheet_ids` |
+| `load_csv` | `Sheet::grid`（`Project::sheet`） |
+| `save_csv` | `Project::save_sheet`（内蔵検証＋on_save 込み） |
+| `validate_sheet` | `Constraints::validate_sheet` |
+| `enum_options` | `Constraints::enum_options`（プルダウン） |
+| `git_status` / `git_add` / `git_commit` / `git_diff` / `git_log` | `GitRepo::*` |
+| `run_export` | `Project::export` |
+
+### 9.10 未確定
+
+- 共通エラー型（`Result` の `E`）の設計（`thiserror` 等）
+- IPC で TS へ渡す DTO を struct と共用するか別に分けるか（serde 派生の範囲）
