@@ -51,6 +51,7 @@
 | D-013 | 2026-07-19 | 行ヘッダー（`row_*`）は **opt-in・例外的**。既定では行は無名。行名が意味を持つ場合（例: 九九）だけ `row_require`/`row_optional` を書き、その場合は**先頭列を行ラベル列**として扱う（データ列ではない） | 大半のシートは行に名前を持たないため、既定を無名にして必要時のみ有効化する |
 | D-014 | 2026-07-19 | `when` は**文字列のミニ式**にして簡易パーサで解釈。条件は `{column=名, op=値}`（`row` も可）、連結は `&`(AND)/`|`(OR)、優先順位は `&`>`|`、括弧は初版非対応。比較 `op` は `equals` から開始 | AND/OR の条件付き制約を素直に書ける。TOML インラインテーブルでは `&`/`|` を扱えないため文字列＋自前パースにする |
 | D-015 | 2026-07-19 | `when` を2段構えに。**L1=宣言式 `when`**（安全・依存なし）、**L2=`when_py`**（bool を返す Python 式、`$column`/`$row` 注入）。安全既定: ①プロジェクト信頼が有効な時のみ実行（フックと同じ信頼モデル）②Python 無ければスキップ＋警告③バッチ評価。実装優先度は最後 | 宣言式で足りない複雑条件に対応しつつ、任意コード実行のリスク・Python 依存・性能を安全側の既定で抑える |
+| D-016 | 2026-07-19 | L1 宣言式の比較演算子は初版から **`equals` ＋ `not_equal`** の2つ（`gt`/`lt`/`in`/`matches` 等は将来）。あわせて「条件システムは現状ベスト解ではなく改善余地あり（宣言式の拡張＝小言語自作化／`when_py`＝利用者への丸投げの側面）」を設計メモとして明記 | `equals` 単独は貧弱すぎ `not_equal` は必須。ただし演算子を増やし続ける/Python に逃げる路線の限界を認識し、実用最小＋逃げ道で割り切る |
 
 <!--
 追記テンプレート（コピーして使う）:
@@ -247,12 +248,15 @@ when     = "{column=processor_type, equals=ARM} & {column=voltage, equals=high}"
   term := cond ( "&" cond )*
   cond := "{" key "=" val ( "," key "=" val )* "}"
   ```
-- 比較演算子（`op`）は初版は `equals` から開始。`gt` / `lt` / `in` / `matches` 等は段階的に追加（→ 6.10 未確定）。
+- 比較演算子（`op`）は初版から **`equals` ＋ `not_equal`** の2つ。`gt` / `lt` / `in` / `matches` 等は段階的に追加（→ 6.10 未確定）。
 
 ```toml
-when = "{column=type, equals=A} | {column=type, equals=B}"   # A または B
-when = "{column=a, equals=1} & {column=b, equals=2}"         # a=1 かつ b=2
+when = "{column=type, equals=A} | {column=type, equals=B}"       # A または B
+when = "{column=a, equals=1} & {column=b, equals=2}"             # a=1 かつ b=2
+when = "{column=status, not_equal=deprecated}"                   # deprecated 以外
 ```
+
+> **設計メモ（既知の割り切り）**: 条件システムは現状のベスト解ではない。「宣言式に AND/OR・演算子を足していく」路線は突き詰めると小さな言語の自作に近づき、「複雑な分は `when_py`(Python) に投げる」路線は設計を利用者へ丸投げする"逃げ"の側面がある。**実用最小（少数の演算子）＋ Python 逃げ道**で当面進め、将来の改善余地として残す、という割り切りで合意済み。
 
 **2段構え（L1 宣言式 / L2 Python）:**
 
