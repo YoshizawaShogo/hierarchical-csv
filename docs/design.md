@@ -65,6 +65,10 @@
 | D-027 | 2026-07-19 | フックの挙動を確定（Q-5〜Q-9）。①内蔵 Constraint 検証 → 通れば `on_save`（フックは追加処理）②プロジェクト信頼が有効な時のみ実行③`fail_policy`=`error`/`warn`/`ignore`④CWD=プロジェクトルート・変数は絶対パス⑤プロジェクト設定は **`.project.toml`**（設定/制約/フックの3ファイル体制） | サブプロセス実行の安全・順序・パスを明確化し、設定ファイルを役割ごとに分離 |
 | D-028 | 2026-07-19 | グロブ OR の `\|` は **丸ごとのパターンを択一で区切る**（`()` グループ化はしない）。例: `metric_cpu\|metric_gpu`（`metric_(cpu\|gpu)` ではない） | 期待挙動に合わせ、パーサも `\|` で分割するだけの単純実装にする |
 | D-029 | 2026-07-19 | 実装は **型駆動設計**で進める。まず厳密な構造体と、その振る舞いをメソッドとして定義（第9章 ドメインモデル）。以降は薄いヘルパと Tauri コマンドの配線でアプリを完成させる | 構造体と振る舞いが正しく定義できていれば接続は機械的で済み、破綻を早期に発見できる |
+| D-030 | 2026-07-19 | `.constraints.toml` / `.hooks.toml` / `.project.toml` を**アプリ内の専用エディターで編集**できるようにする | ユーザーが仕様に沿って書く必要があり、GUI 内で完結させるため |
+| D-031 | 2026-07-19 | 制約違反・設定不備で**アプリを落とさない**。必ず**開いた上でエラーを UI にインライン表示**する（設定ファイルのパース/矛盾エラーも、データのセル違反も同様）。保存も違反で中断せず結果を表示 | 途中で落とすと対話型 GUI エディターの利点が失われるため。エラーは"失敗"でなく"表示するデータ"として扱う |
+| D-032 | 2026-07-19 | エラー型は **`anyhow`**（ライブラリ用の厳密エラー型 `thiserror` 等は作らない） | 本アプリは依存グラフの葉（最終成果物）でライブラリとして使われないため |
+| D-033 | 2026-07-19 | IPC の DTO は**基本ドメイン構造体に `serde` を直接 derive して共用**、そのまま出せない箇所（ライフタイム付き等）だけ別 DTO を用意 | 葉アプリなので変換コストを最小化しつつ、必要箇所のみ分離する |
 
 <!--
 追記テンプレート（コピーして使う）:
@@ -313,7 +317,7 @@ when = "{column=cores, in=[2,4,8]}"                             # in
 - **矛盾なく同時適用できるなら、合成結果をそのまま適用**する。
   - 必須列 = 各 `require` の**和集合**（すべて存在必須）。
   - 許容列 = 当たった**すべての header** が許可（`require` か `optional` グロブに一致）する列のみ。
-- **矛盾があれば、制約ロード時（＝その時点）でエラー**にする。黙って一方を採用しない。
+- **矛盾があれば、制約ロード時に検出して報告**する（黙って一方を採用しない）。ただし D-031 によりアプリは落とさず、**エラーを設定エディターに表示**して修正を促す。
   - 矛盾の定義: ある header が**必須**とする列を、別の header が**許可していない**（strict 既定で暗黙禁止）→ 「存在必須」かつ「存在禁止」で同時に満たせない。
 
 ```toml
@@ -354,7 +358,12 @@ column_require = ["id", "name"]   # name 必須
 
 ### 7.3 保存フロー
 - **Ctrl/Cmd+S で保存**、dirty 表示。
-- 保存時の順序: **内蔵 Constraint 検証 →（通れば）`on_save` フック → 完了**（D-027）。
+- 順序: **CSV 書き込み → 内蔵 Constraint 検証 → `on_save` フック**。違反があっても**保存を落とさず**、違反を UI にインライン表示する（D-031）。`on_save` フックの `fail_policy` は設計者が選ぶ強度（結果は UI に表示、アプリは落ちない）。
+
+### 7.4 設定ファイルの内蔵エディターと非破壊なエラー表示（D-030 / D-031）
+- `.constraints.toml` / `.hooks.toml` / `.project.toml` は**アプリ内の専用エディター**で編集できる（ユーザーが仕様に沿って書く必要があるため）。
+- これらに不備（パースエラー、header 矛盾 D-012、型×規則の非互換 D-021 等）があっても、**アプリは落とさず**、エディター上に**エラーをインライン表示**して修正を促す。
+- データ（セル値）が制約に違反していても同様に、**シートは開いた上で**該当セルにエラーを表示（対話型 GUI エディターの利点を殺さない）。
 
 ---
 
@@ -390,7 +399,11 @@ description = "HTML 仕様書生成"
 
 ## 9. ドメインモデル（構造体とメソッド）
 
-> D-029 に基づく **型駆動設計**。「厳密な構造体＋その振る舞い（メソッド）」を先に確定し、あとは薄いヘルパと Tauri コマンドの配線だけでアプリが繋がる、という方針。以下はシグネチャ主体の設計（実装本体は含めない）。`Result` はプロジェクト共通のエラー型を返す想定。
+> D-029 に基づく **型駆動設計**。「厳密な構造体＋その振る舞い（メソッド）」を先に確定し、あとは薄いヘルパと Tauri コマンドの配線だけでアプリが繋がる、という方針。以下はシグネチャ主体の設計（実装本体は含めない）。
+>
+> **エラー方針（D-031 / D-032）**:
+> - `Result` の `E` は **`anyhow::Error`**（葉＝アプリのため厳密エラー型は作らない, D-032）。`Result` の Err は「真に処理不能な I/O 等」に限る。
+> - **制約違反・設定エラーは"失敗"ではなく"表示するデータ"**（`Vec<Violation>` / `Vec<ConstraintError>`）として返し、**アプリは落とさず必ず開いて UI に表示**する（D-031）。
 
 ### 9.1 project — プロジェクト全体
 
@@ -406,11 +419,14 @@ pub struct Project {
     pub hooks: Hooks,                 // .hooks.toml（無ければ空）
     pub git: Option<GitRepo>,         // .git があるときのみ Some（D-007）
     pub trusted: bool,                // 信頼状態（D-027）
+    pub constraint_errors: Vec<ConstraintError>, // 設定/制約の不備（表示用, D-031。開けなくはしない）
     sheets: BTreeMap<SheetId, Sheet>, // 相対パス → シート
 }
 
 impl Project {
     /// ルートを開き、設定・制約・フック・git を読み込み、CSV を再帰スキャンする。
+    /// 制約/設定に不備があっても**失敗させず** constraint_errors に集めて開く（D-031）。
+    /// Err は真に処理不能な I/O 等のみ。
     pub fn open(root: impl Into<PathBuf>) -> Result<Self>;
     /// CSV を再帰スキャンしてシート一覧を更新（.git/ と .*.toml は除外）。
     pub fn scan(&mut self) -> Result<()>;
@@ -420,9 +436,9 @@ impl Project {
     pub fn git_enabled(&self) -> bool;                   // = self.git.is_some()（D-007）
     pub fn set_trusted(&mut self, yes: bool);            // フック/コード実行の解禁（D-027）
 
-    /// 保存フロー（7.3 / D-027）: 内蔵 Constraint 検証 →（通れば）書き込み → on_save フック。
-    /// 検証違反があれば書き込まず Err(違反リスト)。
-    pub fn save_sheet(&mut self, id: &SheetId) -> Result<SaveReport, Vec<Violation>>;
+    /// 保存フロー（7.3 / D-027 / D-031）: CSV を書き込み、内蔵 Constraint 検証と on_save フックを実行。
+    /// 違反があっても落とさず、SaveReport に違反・フック結果を載せて返す（UI で表示）。
+    pub fn save_sheet(&mut self, id: &SheetId) -> Result<SaveReport>;
     /// エクスポート（on_export フック）。
     pub fn export(&self) -> Vec<HookOutcome>;
 }
@@ -468,10 +484,10 @@ pub struct Constraints {
 
 impl Constraints {
     pub fn load(path: &Path) -> Result<Self>;                // .constraints.toml（無ければ空）
-    /// 静的検証（ロード時）: 型×規則の非互換(D-021)、header 同士の矛盾(D-012)を検出。
-    pub fn check_static(&self, sheet_ids: &[SheetId]) -> Result<(), Vec<ConstraintError>>;
-    /// あるシートに効く header を AND 合成（D-012）。矛盾があれば Err。
-    pub fn effective_header(&self, id: &SheetId) -> Result<EffectiveHeader, ConstraintError>;
+    /// 静的検証: 型×規則の非互換(D-021)、header 同士の矛盾(D-012)を検出し**リストで返す**（表示用, D-031）。
+    pub fn check_static(&self, sheet_ids: &[SheetId]) -> Vec<ConstraintError>;
+    /// あるシートに効く header を AND 合成（D-012）。矛盾は err に載る（落とさない）。
+    pub fn effective_header(&self, id: &SheetId) -> (EffectiveHeader<'_>, Vec<ConstraintError>);
     pub fn values_for(&self, id: &SheetId) -> Vec<&ValueConstraint>;      // D-020
     pub fn validate_sheet(&self, sheet: &Sheet) -> Vec<Violation>;
     /// あるセルの enum 候補（プルダウン用）。when を評価して該当する enum を返す。
@@ -625,7 +641,7 @@ pub enum ViolationKind {
 | `git_status` / `git_add` / `git_commit` / `git_diff` / `git_log` | `GitRepo::*` |
 | `run_export` | `Project::export` |
 
-### 9.10 未確定
+### 9.10 決定済みの補足
 
-- 共通エラー型（`Result` の `E`）の設計（`thiserror` 等）
-- IPC で TS へ渡す DTO を struct と共用するか別に分けるか（serde 派生の範囲）
+- **エラー型**: `anyhow` を採用（D-032）。制約/検証の不備は Err ではなく表示用データ（`Vec<Violation>` / `Vec<ConstraintError>`）で返す（D-031）。
+- **DTO**: 基本はドメイン構造体に `serde` を直接 derive して**共用**。そのまま出せない箇所（ライフタイム付き等）だけ DTO を用意（D-033）。
